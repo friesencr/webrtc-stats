@@ -4,11 +4,13 @@
 
 WebRTCStats is the most complete utility belt that helps with everything related to getting and parsing the stats for WebRTC `PeerConnection`s.
 
-The main advantage of WebRTCStats is that it parses and groups the stats from `PeerConnection`s and offers them in a easy to read way
+The main advantage of WebRTCStats is that it parses and groups the stats from `PeerConnection`s and offers them in an easy to read way
 
 On top of that, it offers the `timeline` which is a list of all the events fired while setting up a `PeerConnection`. Optionally, you can also wrap `getUserMedia` to get a better picture.
 
 WebRTCStats extends `EventEmitter` and uses the same event system to communicate with the rest of the app.
+
+For definitions of the stats dictionaries browsers implement, see the W3C [Identifiers for WebRTC's Statistics API](https://w3c.github.io/webrtc-stats/) specification.
 
 ## Install
 
@@ -79,7 +81,7 @@ let stats = new WebRTCStats({
     // If the data object should contain a remote attribute that will contain stats for the remote peer, from `remote-inbound-rtp`, etc
     remote: true, // Default: true
 
-    // If we should wrap the `geUserMedia` calls so we can gather events when the methods is called or success/error
+    // If we should wrap the `getUserMedia` calls so we can gather events when the methods is called or success/error
     wrapGetUserMedia: false, // Default: false
     
     // If we should log messages

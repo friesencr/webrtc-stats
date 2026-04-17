@@ -4,37 +4,33 @@ import {StatsObject, CodecInfo, TrackReport, ParseStatsOptions} from './types/in
  * A set of methods used to parse the rtc stats
  */
 
+/** Inbound/outbound RTP rows: add bitrate + packetRate from delta vs previous sample */
+function addDerivedRatesForMedia (
+  current: StatsObject['audio'],
+  previous: StatsObject['audio']
+): void {
+  current.inbound.forEach((report) => {
+    const prev = previous.inbound.find(r => r.id === report.id)
+    report.bitrate = computeBitrate(report, prev, 'bytesReceived')
+    report.packetRate = computeBitrate(report, prev, 'packetsReceived')
+  })
+  current.outbound.forEach((report) => {
+    const prev = previous.outbound.find(r => r.id === report.id)
+    report.bitrate = computeBitrate(report, prev, 'bytesSent')
+    report.packetRate = computeBitrate(report, prev, 'packetsSent')
+  })
+}
+
 function addAdditionalData (currentStats: StatsObject, previousStats?: StatsObject) {
-  // we need the previousStats stats to compute thse values
   if (!previousStats) return currentStats
 
-  // audio
-  // inbound
-  currentStats.audio.inbound.map((report) => {
-    let prev = previousStats.audio.inbound.find(r => r.id === report.id)
-    report.bitrate = computeBitrate(report, prev, 'bytesReceived')
-    report.packetRate = computeBitrate(report, prev, 'packetsReceived')
-  })
-  // outbound
-  currentStats.audio.outbound.map((report) => {
-    let prev = previousStats.audio.outbound.find(r => r.id === report.id)
-    report.bitrate = computeBitrate(report, prev, 'bytesSent')
-    report.packetRate = computeBitrate(report, prev, 'packetsSent')
-  })
+  addDerivedRatesForMedia(currentStats.audio, previousStats.audio)
+  addDerivedRatesForMedia(currentStats.video, previousStats.video)
 
-  // video
-  // inbound
-  currentStats.video.inbound.map((report) => {
-    let prev = previousStats.video.inbound.find(r => r.id === report.id)
-    report.bitrate = computeBitrate(report, prev, 'bytesReceived')
-    report.packetRate = computeBitrate(report, prev, 'packetsReceived')
-  })
-  // outbound
-  currentStats.video.outbound.map((report) => {
-    let prev = previousStats.video.outbound.find(r => r.id === report.id)
-    report.bitrate = computeBitrate(report, prev, 'bytesSent')
-    report.packetRate = computeBitrate(report, prev, 'packetsSent')
-  })
+  if (currentStats.remote && previousStats.remote) {
+    addDerivedRatesForMedia(currentStats.remote.audio, previousStats.remote.audio)
+    addDerivedRatesForMedia(currentStats.remote.video, previousStats.remote.video)
+  }
 
   return currentStats
 }
@@ -59,18 +55,25 @@ function getCandidatePairInfo (candidatePair, stats) {
 
 // Takes two stats reports and determines the rate based on two counter readings
 // and the time between them (which is in units of milliseconds).
-export function computeRate (newReport: TrackReport, oldReport: TrackReport, statName: string): number {
+export function computeRate (newReport: TrackReport, oldReport: TrackReport, statName: string): number | null {
+  if (!oldReport) return null
   const newVal = newReport[statName]
-  const oldVal = oldReport ? oldReport[statName] : null
-  if (newVal === null || oldVal === null) {
-    return null
-  }
-  return (newVal - oldVal) / (newReport.timestamp - oldReport.timestamp) * 1000
+  const oldVal = oldReport[statName]
+  if (newVal == null || oldVal == null) return null
+  const n = Number(newVal)
+  const o = Number(oldVal)
+  if (Number.isNaN(n) || Number.isNaN(o)) return null
+  const dt = newReport.timestamp - oldReport.timestamp
+  // Same timestamp (common for some remote-* reports) → avoid 0/0 → NaN
+  if (!(dt > 0)) return null
+  return ((n - o) / dt) * 1000
 }
 
 // Convert a byte rate to a bit rate.
-export function computeBitrate (newReport: TrackReport, oldReport: TrackReport, statName: string): number {
-  return computeRate(newReport, oldReport, statName) * 8
+export function computeBitrate (newReport: TrackReport, oldReport: TrackReport, statName: string): number | null {
+  const rate = computeRate(newReport, oldReport, statName)
+  if (rate == null) return null
+  return rate * 8
 }
 
 export function map2obj (stats: any) {

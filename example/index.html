@@ -1,151 +1,555 @@
-<html>
+<!DOCTYPE html>
+<html lang="en">
   <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WebRTCStats — loopback demo</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.6/dist/chart.umd.min.js"></script>
+    <style>
+      :root { font-family: system-ui, sans-serif; }
+      body { max-width: 960px; margin: 1rem auto; padding: 0 1rem; }
+      h1 { font-size: 1.25rem; }
+      p.hint { color: #444; font-size: 0.9rem; line-height: 1.45; }
+      .row { display: flex; flex-wrap: wrap; gap: 1rem; margin: 1rem 0; }
+      .pane { flex: 1 1 280px; }
+      .pane h2 { font-size: 0.85rem; margin: 0 0 0.35rem; font-weight: 600; }
+      video {
+        width: 100%;
+        max-height: 240px;
+        background: #111;
+        border-radius: 8px;
+        object-fit: cover;
+      }
+      .controls { display: flex; gap: 0.5rem; flex-wrap: wrap; margin: 0.75rem 0; }
+      button { padding: 0.4rem 0.75rem; cursor: pointer; }
+      button:disabled { cursor: not-allowed; opacity: 0.55; }
+      #statsOut {
+        font-size: 11px;
+        line-height: 1.35;
+        background: #0d1117;
+        color: #c9d1d9;
+        padding: 0.75rem;
+        border-radius: 8px;
+        overflow: auto;
+        max-height: 220px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      #logOut {
+        font-size: 11px;
+        background: #f6f8fa;
+        border: 1px solid #d0d7de;
+        padding: 0.5rem;
+        border-radius: 6px;
+        max-height: 120px;
+        overflow: auto;
+      }
+      .chart-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: 1rem;
+        margin-top: 0.75rem;
+      }
+      .chart-box {
+        background: #fafbfc;
+        border: 1px solid #d0d7de;
+        border-radius: 8px;
+        padding: 0.5rem 0.5rem 0;
+      }
+      .chart-box h3 {
+        font-size: 0.75rem;
+        font-weight: 600;
+        margin: 0 0 0.25rem;
+        color: #24292f;
+      }
+      .chart-box canvas { max-height: 180px; }
+    </style>
   </head>
   <body>
-    <div id="localVideo"></div>
-    <div id="remoteVideo"></div>
-    <button id="startButton">start</button>
-    <button id="callButton">call</button>
-    <button id="hangupButton">hangup</button>
-    <script src="https://unpkg.com/@peermetrics/webrtc-stats@latest/dist/browser.js"></script>
+    <h1>WebRTCStats loopback demo</h1>
+    <p class="hint">
+      Two <code>RTCPeerConnection</code>s in one tab exchange an offer/answer over loopback ICE.
+      One camera/mic capture is shared to both peers so a single device works reliably.
+      Charts use parsed <strong>stats</strong> when the browser exposes them (names vary by engine).
+      Core: bitrate, jitter, RTT, loss. Advanced: video drops/freezes, NACK/retransmits, encoder quality
+      limitation (Chrome), audio concealment samples.
+    </p>
 
-    <!-- <script type="text/javascript" src="../dist/browser.js"></script> -->
+    <div class="row">
+      <div class="pane">
+        <h2>Local preview (peer&nbsp;1 sender)</h2>
+        <video id="localVideo" playsinline autoplay muted></video>
+      </div>
+      <div class="pane">
+        <h2>Remote preview (peer&nbsp;2 receives)</h2>
+        <video id="remoteVideo" playsinline autoplay></video>
+      </div>
+    </div>
+
+    <div class="controls">
+      <button type="button" id="startButton">Start camera</button>
+      <button type="button" id="callButton" disabled>Connect (offer/answer)</button>
+      <button type="button" id="hangupButton" disabled>Hang up</button>
+    </div>
+
+    <h2 style="font-size:0.9rem">Latest parsed stats (peer 1 &amp; 2)</h2>
+    <pre id="statsOut">Connect first — stats appear every getStats interval.</pre>
+
+    <h2 style="font-size:0.9rem;margin-top:1rem">Live metrics (last ~30 samples)</h2>
+    <p class="hint" style="margin:0 0 0.5rem">Charts stay after hang up; they clear when you click <strong>Start camera</strong> again.</p>
+    <div class="chart-grid">
+      <div class="chart-box">
+        <h3>Receive bitrate (inbound audio + video, kb/s)</h3>
+        <canvas id="chartBitrate" height="160"></canvas>
+      </div>
+      <div class="chart-box">
+        <h3>Jitter — inbound (ms)</h3>
+        <canvas id="chartJitter" height="160"></canvas>
+      </div>
+      <div class="chart-box">
+        <h3>RTT — remote-inbound / RTCP (ms)</h3>
+        <canvas id="chartRtt" height="160"></canvas>
+      </div>
+      <div class="chart-box">
+        <h3>Packets lost — inbound (cumulative)</h3>
+        <canvas id="chartLost" height="160"></canvas>
+      </div>
+    </div>
+
+    <h2 style="font-size:0.9rem;margin-top:1.25rem">Advanced (best-effort per browser)</h2>
+    <p class="hint" style="margin:0 0 0.5rem">
+      These plots matter because they reveal <strong>smoothness</strong> (drops/freezes), <strong>loss recovery</strong> (NACK/retransmits), <strong>why the encoder is backing off</strong> (quality limitation), and <strong>audio gap-filling</strong> (concealment)—issues that bitrate and delay alone often miss.
+      <code>qualityLimitationReason</code> is ordinal: 0 none, 1 cpu, 2 bandwidth, 3 other, 4 unknown.
+      Freeze/drop/concealment are cumulative counters from inbound reports.
+    </p>
+    <div class="chart-grid">
+      <div class="chart-box">
+        <h3>Video inbound — frames dropped (cumulative)</h3>
+        <canvas id="chartFramesDropped" height="160"></canvas>
+      </div>
+      <div class="chart-box">
+        <h3>Video inbound — freeze duration (s, cumulative)</h3>
+        <canvas id="chartFreezeSec" height="160"></canvas>
+      </div>
+      <div class="chart-box">
+        <h3>NACK count — inbound audio + video (cumulative)</h3>
+        <canvas id="chartNack" height="160"></canvas>
+      </div>
+      <div class="chart-box">
+        <h3>Retransmitted packets received — inbound (cumulative)</h3>
+        <canvas id="chartRetrans" height="160"></canvas>
+      </div>
+      <div class="chart-box">
+        <h3>Outbound quality limitation (Chrome, ordinal)</h3>
+        <canvas id="chartQl" height="160"></canvas>
+      </div>
+      <div class="chart-box">
+        <h3>Audio inbound — concealed samples (cumulative)</h3>
+        <canvas id="chartConcealed" height="160"></canvas>
+      </div>
+    </div>
+
+    <h2 style="font-size:0.85rem;margin-top:1rem">Connection log (compact)</h2>
+    <pre id="logOut"></pre>
+
+    <!-- <script src="https://unpkg.com/@peermetrics/webrtc-stats@latest/dist/browser.js"></script> -->
+    <script src="../dist/browser.js"></script>
 
     <script>
-      window.stats = new WebRTCStats({
-        getStatsInterval: 2000,
-        rawStats: true,
-        statsObject: true,
-        filteredStats: true,
-        wrapGetUserMedia: true,
-        debug: true,
-        remote: true
-      })
+      (function () {
+        const MAX_POINTS = 30
+        const peerColors = { '1': 'rgb(31, 111, 235)', '2': 'rgb(214, 90, 14)' }
 
-      window.stats.on('timeline', (ev) => {
-        console.log('timeline', ev)
-      })
+        function sumInboundField (lists, field) {
+          var s = 0
+          var any = false
+          lists.forEach(function (list) {
+            if (!list) return
+            list.forEach(function (r) {
+              var v = r[field]
+              if (v != null && !Number.isNaN(Number(v))) {
+                s += Number(v)
+                any = true
+              }
+            })
+          })
+          return any ? s : null
+        }
+
+        /** Parsed stats row → metrics for charts */
+        function extractChartMetrics (d) {
+          if (!d) return null
+          let rxKbps = 0
+          let hasBr = false
+          function addInboundBitrate (list) {
+            if (!list) return
+            list.forEach(function (r) {
+              if (r.bitrate != null && !Number.isNaN(r.bitrate)) {
+                rxKbps += r.bitrate / 1000
+                hasBr = true
+              }
+            })
+          }
+          addInboundBitrate(d.audio && d.audio.inbound)
+          addInboundBitrate(d.video && d.video.inbound)
+
+          const inboundRows = []
+            .concat(d.audio && d.audio.inbound ? d.audio.inbound : [])
+            .concat(d.video && d.video.inbound ? d.video.inbound : [])
+          const jitters = []
+          inboundRows.forEach(function (r) {
+            if (r.jitter == null) return
+            var j = Number(r.jitter)
+            if (Number.isNaN(j)) return
+            if (j < 2) j = j * 1000
+            jitters.push(j)
+          })
+          const jitterMs = jitters.length ? jitters.reduce(function (a, b) { return a + b }, 0) / jitters.length : null
+
+          let pktsLost = 0
+          inboundRows.forEach(function (r) {
+            if (r.packetsLost != null) pktsLost += r.packetsLost
+          })
+
+          var rttMs = null
+          var ri = (d.remote && d.remote.audio && d.remote.audio.inbound && d.remote.audio.inbound[0]) ||
+            (d.remote && d.remote.video && d.remote.video.inbound && d.remote.video.inbound[0])
+          if (ri && ri.roundTripTime != null) {
+            rttMs = Number(ri.roundTripTime) * 1000
+            if (Number.isNaN(rttMs)) rttMs = null
+          }
+
+          var vin = d.video && d.video.inbound ? d.video.inbound : []
+          var ain = d.audio && d.audio.inbound ? d.audio.inbound : []
+          var vidFramesDropped = sumInboundField([vin], 'framesDropped')
+          var freezeSec = sumInboundField([vin], 'totalFreezesDuration')
+          if (freezeSec == null) freezeSec = sumInboundField([vin], 'totalFreezeDuration')
+          var nackIn = sumInboundField([ain, vin], 'nackCount')
+          var retransIn = sumInboundField([ain, vin], 'retransmittedPacketsReceived')
+          var audioConcealed = sumInboundField([ain], 'concealedSamples')
+
+          var qlOrdinal = null
+          var qmap = { none: 0, cpu: 1, bandwidth: 2, other: 3 }
+          var vout = d.video && d.video.outbound && d.video.outbound[0]
+          if (vout && vout.qualityLimitationReason != null) {
+            var qr = String(vout.qualityLimitationReason)
+            qlOrdinal = Object.prototype.hasOwnProperty.call(qmap, qr) ? qmap[qr] : 4
+          }
+
+          return {
+            rxKbps: hasBr ? rxKbps : null,
+            jitterMs: jitterMs,
+            rttMs: rttMs,
+            pktsLost: inboundRows.length ? pktsLost : null,
+            vidFramesDropped: vidFramesDropped,
+            vidFreezeSec: freezeSec,
+            nackIn: nackIn,
+            retransIn: retransIn,
+            qlOrdinal: qlOrdinal,
+            audioConcealed: audioConcealed
+          }
+        }
+
+        const METRIC_DEFAULTS = {
+          rxKbps: null,
+          jitterMs: null,
+          rttMs: null,
+          pktsLost: null,
+          vidFramesDropped: null,
+          vidFreezeSec: null,
+          nackIn: null,
+          retransIn: null,
+          qlOrdinal: null,
+          audioConcealed: null
+        }
+
+        const lastByPeer = { '1': null, '2': null }
+        const charts = {}
+        const chartIds = [
+          { id: 'chartBitrate', key: 'rxKbps', yMax: null },
+          { id: 'chartJitter', key: 'jitterMs', yMax: null },
+          { id: 'chartRtt', key: 'rttMs', yMax: null },
+          { id: 'chartLost', key: 'pktsLost', yMax: null },
+          { id: 'chartFramesDropped', key: 'vidFramesDropped', yMax: null },
+          { id: 'chartFreezeSec', key: 'vidFreezeSec', yMax: null },
+          { id: 'chartNack', key: 'nackIn', yMax: null },
+          { id: 'chartRetrans', key: 'retransIn', yMax: null },
+          { id: 'chartQl', key: 'qlOrdinal', yMax: 4 },
+          { id: 'chartConcealed', key: 'audioConcealed', yMax: null }
+        ]
+
+        function chartOpts (key, yMax) {
+          var yZero = [
+            'pktsLost', 'rxKbps', 'vidFramesDropped', 'vidFreezeSec', 'nackIn', 'retransIn', 'audioConcealed'
+          ].indexOf(key) >= 0
+          var y = { beginAtZero: yZero, ticks: { font: { size: 9 } } }
+          if (yMax != null) {
+            y.min = 0
+            y.max = yMax
+            if (key === 'qlOrdinal') y.ticks = { font: { size: 9 }, stepSize: 1 }
+          }
+          return {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+              legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 10 } } }
+            },
+            scales: {
+              x: { ticks: { maxRotation: 0, font: { size: 9 } } },
+              y: y
+            }
+          }
+        }
+
+        function initCharts () {
+          chartIds.forEach(function (c) {
+            const el = document.getElementById(c.id)
+            charts[c.key] = new Chart(el.getContext('2d'), {
+              type: 'line',
+              data: {
+                labels: [],
+                datasets: [
+                  { label: 'peer 1', data: [], borderColor: peerColors['1'], tension: 0.15, spanGaps: true },
+                  { label: 'peer 2', data: [], borderColor: peerColors['2'], tension: 0.15, spanGaps: true }
+                ]
+              },
+              options: chartOpts(c.key, c.yMax)
+            })
+          })
+        }
+
+        function pushSample () {
+          const t = new Date().toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
+          ;['1', '2'].forEach(function (pid) {
+            if (!lastByPeer[pid]) lastByPeer[pid] = Object.assign({}, METRIC_DEFAULTS)
+          })
+          chartIds.forEach(function (c) {
+            const ch = charts[c.key]
+            ch.data.labels.push(t)
+            if (ch.data.labels.length > MAX_POINTS) {
+              ch.data.labels.shift()
+            }
+            ;['1', '2'].forEach(function (pid, idx) {
+              const m = lastByPeer[pid]
+              var v = m ? m[c.key] : null
+              ch.data.datasets[idx].data.push(v)
+              if (ch.data.datasets[idx].data.length > MAX_POINTS) ch.data.datasets[idx].data.shift()
+            })
+            ch.update('none')
+          })
+        }
+
+        window.resetStatsCharts = function () {
+          chartIds.forEach(function (c) {
+            const ch = charts[c.key]
+            if (!ch) return
+            ch.data.labels = []
+            ch.data.datasets[0].data = []
+            ch.data.datasets[1].data = []
+            ch.update('none')
+          })
+          lastByPeer['1'] = null
+          lastByPeer['2'] = null
+        }
+
+        window.stats = new WebRTCStats({
+          getStatsInterval: 2000,
+          rawStats: false,
+          statsObject: false,
+          filteredStats: false,
+          wrapGetUserMedia: true,
+          debug: false,
+          remote: true
+        })
+
+        const logEl = document.getElementById('logOut')
+        const maxLogLines = 12
+        function logLine (msg) {
+          const t = new Date().toISOString().slice(11, 23)
+          const lines = (logEl.textContent + '\n[' + t + '] ' + msg).trim().split('\n')
+          logEl.textContent = lines.slice(-maxLogLines).join('\n')
+        }
+
+        window.stats.on('timeline', function (ev) {
+          if (ev.tag === 'stats') return
+          if (ev.tag === 'getUserMedia' && ev.data && ev.data.constraints) return
+          logLine(ev.tag + ' · ' + (ev.event || '') + (ev.data != null && typeof ev.data === 'string' ? ' · ' + ev.data : ''))
+        })
+
+        const statsOut = document.getElementById('statsOut')
+        function summarizeStatsData (d) {
+          if (!d) return '(empty)'
+          const parts = []
+          function rows (label, list, dir) {
+            if (!list || !list.length) return
+            list.forEach(function (r, i) {
+              function fmtBitrate (v) {
+                if (v == null || (typeof v === 'number' && Number.isNaN(v))) return '—'
+                return Math.round(v) + ' b/s'
+              }
+              function fmtPktrate (v) {
+                if (v == null || (typeof v === 'number' && Number.isNaN(v))) return '—'
+                return v.toFixed(1) + ' pkt/s'
+              }
+              parts.push(label + ' ' + dir + '[' + i + '] bitrate ' + fmtBitrate(r.bitrate) + ' · pktrate ' + fmtPktrate(r.packetRate))
+            })
+          }
+          if (d.audio) {
+            rows('audio', d.audio.inbound, 'in')
+            rows('audio', d.audio.outbound, 'out')
+          }
+          if (d.video) {
+            rows('video', d.video.inbound, 'in')
+            rows('video', d.video.outbound, 'out')
+          }
+          if (d.remote) {
+            rows('remote audio', d.remote.audio.inbound, 'in')
+            rows('remote audio', d.remote.audio.outbound, 'out')
+            rows('remote video', d.remote.video.inbound, 'in')
+            rows('remote video', d.remote.video.outbound, 'out')
+          }
+          return parts.length ? parts.join('\n') : JSON.stringify(Object.keys(d))
+        }
+
+        const lastStatsByPeer = {}
+        window.stats.on('stats', function (ev) {
+          const chartM = extractChartMetrics(ev.data)
+          if (chartM) lastByPeer[ev.peerId] = chartM
+          pushSample()
+
+          lastStatsByPeer[ev.peerId] =
+            'getStats ' + ev.timeTaken + ' ms\n' + summarizeStatsData(ev.data)
+          statsOut.textContent =
+            '=== peer 1 ===\n' + (lastStatsByPeer['1'] || '…') +
+            '\n\n=== peer 2 ===\n' + (lastStatsByPeer['2'] || '…')
+        })
+
+        initCharts()
+        window.demoLogLine = logLine
+      })()
     </script>
 
     <script>
-      'use strict';
+      'use strict'
 
-      // simple example
-      const startButton = document.getElementById('startButton');
-      const callButton = document.getElementById('callButton');
-      const hangupButton = document.getElementById('hangupButton');
-      callButton.disabled = true;
-      hangupButton.disabled = true;
-      startButton.addEventListener('click', start);
-      callButton.addEventListener('click', call);
-      hangupButton.addEventListener('click', hangup);
+      const startButton = document.getElementById('startButton')
+      const callButton = document.getElementById('callButton')
+      const hangupButton = document.getElementById('hangupButton')
+      const localVideo = document.getElementById('localVideo')
+      const remoteVideo = document.getElementById('remoteVideo')
 
-      const localVideo = document.getElementById('localVideo');
-      const remoteVideo = document.getElementById('remoteVideo');
+      let mediaStream
+      let pc1
+      let pc2
 
-      let localStream;
-      let remoteStream;
-      let pc1;
-      let pc2;
       const offerOptions = {
-        offerToReceiveAudio: 1,
-        offerToReceiveVideo: 1
-      };
-
-      const gUMConstraints = {
-        audio: true,
-        video: true
+        offerToReceiveAudio: true,
+        offerToReceiveVideo: true
       }
 
-      function getOtherPc(pc) {
-        return (pc === pc1) ? pc2 : pc1;
+      const gUMConstraints = { audio: true, video: true }
+
+      function getOtherPc (pc) {
+        return (pc === pc1) ? pc2 : pc1
       }
 
-      async function start() {
-        // console.log('Requesting local stream');
-        startButton.disabled = true;
+      async function start () {
+        if (typeof window.resetStatsCharts === 'function') window.resetStatsCharts()
+        startButton.disabled = true
         try {
-          localStream = await navigator.mediaDevices.getUserMedia(gUMConstraints);
-          console.log('Got stream for peer 1')
-          remoteStream = await navigator.mediaDevices.getUserMedia(gUMConstraints);
-          console.log('Got stream for peer 2')
-
-          localVideo.srcObject = localStream;
-          callButton.disabled = false;
+          mediaStream = await navigator.mediaDevices.getUserMedia(gUMConstraints)
+          localVideo.srcObject = mediaStream
+          if (window.demoLogLine) window.demoLogLine('getUserMedia OK (one stream for both peers)')
+          callButton.disabled = false
         } catch (e) {
-          alert(`getUserMedia() error: ${e.name}`);
+          if (window.demoLogLine) window.demoLogLine('getUserMedia failed: ' + e.message)
+          alert('getUserMedia() error: ' + e.name)
+          startButton.disabled = false
         }
       }
 
-      async function call() {
-        callButton.disabled = true;
-        hangupButton.disabled = false;
+      async function call () {
+        if (!mediaStream) return
+        callButton.disabled = true
+        hangupButton.disabled = false
 
         const configuration = {}
 
-        // peer 1
-        pc1 = new RTCPeerConnection(configuration);
-        pc1.addEventListener('icecandidate', e => onIceCandidate(pc1, e));
+        pc1 = new RTCPeerConnection(configuration)
+        pc1.addEventListener('icecandidate', function (e) { onIceCandidate(pc1, e) })
 
-        stats.addConnection({
-          pc: pc1,
-          peerId: '1'
+        pc2 = new RTCPeerConnection(configuration)
+        pc2.addEventListener('icecandidate', function (e) { onIceCandidate(pc2, e) })
+        pc2.addEventListener('track', gotRemoteStream)
+
+        stats.addConnection({ pc: pc1, peerId: '1' })
+        stats.addConnection({ pc: pc2, peerId: '2' })
+
+        mediaStream.getTracks().forEach(function (track) {
+          pc1.addTrack(track, mediaStream)
+          pc2.addTrack(track, mediaStream)
         })
 
-        // peer 2
-        pc2 = new RTCPeerConnection(configuration);
-        pc2.addEventListener('icecandidate', e => onIceCandidate(pc2, e));
-        pc2.addEventListener('track', gotRemoteStream);
-
-        // stats.addConnection({
-        //   pc: pc2,
-        //   peerId: '2'
-        // })
-
-        localStream.getTracks().forEach(track => pc1.addTrack(track, localStream));
-        remoteStream.getTracks().forEach(track => pc2.addTrack(track, remoteStream));
-
-        const offer = await pc1.createOffer(offerOptions);
-        await pc1.setLocalDescription(offer);
-
-        await pc2.setRemoteDescription(offer);
-        const answer = await pc2.createAnswer();
-
-        await pc2.setLocalDescription(answer);
-        await pc1.setRemoteDescription(answer);
+        try {
+          const offer = await pc1.createOffer(offerOptions)
+          await pc1.setLocalDescription(offer)
+          await pc2.setRemoteDescription(offer)
+          const answer = await pc2.createAnswer()
+          await pc2.setLocalDescription(answer)
+          await pc1.setRemoteDescription(answer)
+          if (window.demoLogLine) window.demoLogLine('signaling complete')
+        } catch (e) {
+          if (window.demoLogLine) window.demoLogLine('call failed: ' + e.message)
+          hangup()
+        }
       }
 
-      function gotRemoteStream(e) {
+      function gotRemoteStream (e) {
         if (remoteVideo.srcObject !== e.streams[0]) {
-          remoteVideo.srcObject = e.streams[0];
+          remoteVideo.srcObject = e.streams[0]
         }
       }
 
-      async function onIceCandidate(pc, event) {
+      async function onIceCandidate (pc, event) {
         if (!event.candidate) return
-        await (getOtherPc(pc).addIceCandidate(event.candidate));
+        try {
+          await getOtherPc(pc).addIceCandidate(event.candidate)
+        } catch (e) {
+          if (window.demoLogLine) window.demoLogLine('addIceCandidate error: ' + e.message)
+        }
       }
 
-      function hangup() {
-        let local = pc1.getSenders()
-        for (let rtpSender of local) {
-            if (rtpSender.track) {
-                rtpSender.track.stop()
-            }
+      function hangup () {
+        if (window.stats) {
+          stats.removeAllPeers()
         }
-        local = pc2.getSenders()
-        for (let rtpSender of local) {
-            if (rtpSender.track) {
-                rtpSender.track.stop()
-            }
+        if (pc1) {
+          pc1.getSenders().forEach(function (s) { if (s.track) s.track.stop() })
+          pc1.close()
+          pc1 = null
         }
-        pc1.close();
-        pc2.close();
-        pc1 = null;
-        pc2 = null;
-        hangupButton.disabled = true;
-        callButton.disabled = false;
+        if (pc2) {
+          pc2.getSenders().forEach(function (s) { if (s.track) s.track.stop() })
+          pc2.close()
+          pc2 = null
+        }
+        if (mediaStream) {
+          mediaStream.getTracks().forEach(function (t) { t.stop() })
+          mediaStream = null
+        }
+        localVideo.srcObject = null
+        remoteVideo.srcObject = null
+        document.getElementById('statsOut').textContent = 'Disconnected — start again.'
+        hangupButton.disabled = true
+        callButton.disabled = true
+        startButton.disabled = false
       }
+
+      startButton.addEventListener('click', start)
+      callButton.addEventListener('click', call)
+      hangupButton.addEventListener('click', hangup)
     </script>
   </body>
 </html>
