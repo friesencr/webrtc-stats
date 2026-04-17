@@ -75,7 +75,7 @@ export class WebRTCStats extends EventEmitter {
 
     const options = {...constructorOptions}
 
-    this.isEdge = !!window.RTCIceGatherer
+    this.isEdge = !!(window as unknown as { RTCIceGatherer?: unknown }).RTCIceGatherer
 
     this.getStatsInterval = options.getStatsInterval || 1000
     this.rawStats = !!options.rawStats
@@ -977,7 +977,7 @@ export class WebRTCStats extends EventEmitter {
           .then(function (stream: MediaStream) {
             // self.debug('navigator.mediaDevices.getDisplayMediaOnSuccess', null, dumpStream(stream))
             return stream
-          }, function (err: DOMError) {
+          }, function (err: Error) {
             self.debug('navigator.mediaDevices.getDisplayMediaOnFailure', null, err.name)
             return Promise.reject(err)
           })

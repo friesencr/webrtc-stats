@@ -58,7 +58,7 @@ export interface AddConnectionResponse {
 export interface GetUserMediaResponse {
     constraints?: MediaStreamConstraints
     stream?: MediaStream
-    error?: DOMError
+    error?: Error
 }
 
 export interface MonitorPeerOptions {
@@ -96,8 +96,8 @@ export interface RemoveConnectionReturn {
 }
 
 export interface TrackReport extends RTCStats {
-    bitrate?: number
-    packetRate?: number
+    bitrate?: number | null
+    packetRate?: number | null
 }
 
 interface StatsObjectDetails {
