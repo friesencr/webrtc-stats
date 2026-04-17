@@ -150,6 +150,7 @@
     </div>
 
     <h2 style="font-size:0.85rem;margin-top:1rem">Connection log (compact)</h2>
+    <p class="hint" style="margin:0 0 0.35rem">Mirrored to the browser <strong>Console</strong> with prefix <code>[webrtc-stats demo]</code> (stats + timeline).</p>
     <pre id="logOut"></pre>
 
     <!-- <script src="https://unpkg.com/@peermetrics/webrtc-stats@latest/dist/browser.js"></script> -->
@@ -367,6 +368,7 @@
         const logEl = document.getElementById('logOut')
         const maxLogLines = 12
         function logLine (msg) {
+          console.log('[webrtc-stats demo]', msg)
           const t = new Date().toISOString().slice(11, 23)
           const lines = (logEl.textContent + '\n[' + t + '] ' + msg).trim().split('\n')
           logEl.textContent = lines.slice(-maxLogLines).join('\n')
@@ -374,7 +376,19 @@
 
         window.stats.on('timeline', function (ev) {
           if (ev.tag === 'stats') return
-          if (ev.tag === 'getUserMedia' && ev.data && ev.data.constraints) return
+          if (ev.tag === 'getUserMedia') {
+            console.log('[webrtc-stats demo] getUserMedia (full timeline event)', ev)
+            if (ev.data && ev.data.constraints) {
+              logLine('getUserMedia · request ' + JSON.stringify(ev.data.constraints))
+              return
+            }
+            if (ev.data && ev.data.stream) {
+              logLine('getUserMedia · stream acquired (tracks: ' + ev.data.stream.getTracks().map(function (t) { return t.kind }).join(', ') + ')')
+              return
+            }
+            logLine('getUserMedia · ' + (ev.event || 'event'))
+            return
+          }
           logLine(ev.tag + ' · ' + (ev.event || '') + (ev.data != null && typeof ev.data === 'string' ? ' · ' + ev.data : ''))
         })
 
@@ -415,6 +429,7 @@
 
         const lastStatsByPeer = {}
         window.stats.on('stats', function (ev) {
+          console.log('[webrtc-stats demo] stats', 'peer=' + ev.peerId, ev.timeTaken + ' ms', ev.data)
           const chartM = extractChartMetrics(ev.data)
           if (chartM) lastByPeer[ev.peerId] = chartM
           pushSample()
@@ -522,6 +537,7 @@
       }
 
       function hangup () {
+        if (window.demoLogLine) window.demoLogLine('hangup · stopping tracks and closing peer connections')
         if (window.stats) {
           stats.removeAllPeers()
         }
