@@ -19,11 +19,41 @@ import {parseStats, map2obj} from './utils'
 // used to keep track of events listeners. useful when we want to remove them
 let eventListeners = {}
 
-// used to save the original getUsermedia native method
-let origGetUserMedia
-
 // tracks that have been obtained from calling getUsermedia
 let localTracks = []
+
+/**
+ * Shared state for wrapping `navigator.mediaDevices.getUserMedia`.
+ *
+ * We only ever replace `getUserMedia` once per page. If another WebRTCStats is created
+ * later, it just subscribes to the wrapper that's already there.
+ *
+ * Why: in the past, each new WebRTCStats would wrap `getUserMedia` again and save its
+ * own "original" pointer. A second instance would save the first wrapper as the
+ * "original", and the first wrapper would end up calling itself — infinite recursion
+ * ("Maximum call stack size exceeded"). This happened in apps that recreate
+ * WebRTCStats per call/session without reloading the page.
+ */
+type GetUserMediaFn = typeof navigator.mediaDevices.getUserMedia
+type GumSubscriber = (info: { constraints?: MediaStreamConstraints, stream?: MediaStream, error?: Error }) => void
+
+const GUM_WRAP_MARKER = '__webrtcStatsGumWrapped__'
+let gumInstalledWrapper: GetUserMediaFn | null = null
+let gumPreviousImpl: GetUserMediaFn | null = null
+const gumSubscribers: Set<GumSubscriber> = new Set()
+
+/**
+ * Shared state for wrapping `navigator.mediaDevices.getDisplayMedia` (screen share).
+ * Same contract as the getUserMedia wrap: at most one wrapper per page, instances
+ * subscribe, and native is restored only when the last subscriber is destroyed.
+ */
+type GetDisplayMediaFn = (constraints?: any) => Promise<MediaStream>
+type GdmSubscriber = (info: { constraints?: any, stream?: MediaStream, error?: Error }) => void
+
+const GDM_WRAP_MARKER = '__webrtcStatsGdmWrapped__'
+let gdmInstalledWrapper: GetDisplayMediaFn | null = null
+let gdmPreviousImpl: GetDisplayMediaFn | null = null
+const gdmSubscribers: Set<GdmSubscriber> = new Set()
 
 export class WebRTCStats extends EventEmitter {
   private readonly isEdge: boolean
@@ -35,6 +65,11 @@ export class WebRTCStats extends EventEmitter {
   private readonly statsObject: boolean
   private readonly filteredStats: boolean
   private readonly shouldWrapGetUserMedia: boolean
+  private readonly shouldWrapGetDisplayMedia: boolean
+  /** The `getUserMedia` subscriber this instance registered (if `wrapGetUserMedia: true`). */
+  private gumSubscriber: GumSubscriber | null = null
+  /** The `getDisplayMedia` subscriber this instance registered (if `wrapGetDisplayMedia: true`). */
+  private gdmSubscriber: GdmSubscriber | null = null
   private debug: any
   private readonly remote: boolean = true
   private peersToMonitor: MonitoredPeersObject = {}
@@ -82,8 +117,8 @@ export class WebRTCStats extends EventEmitter {
     this.statsObject = !!options.statsObject
     this.filteredStats = !!options.filteredStats
 
-    // getUserMedia options
     this.shouldWrapGetUserMedia = !!options.wrapGetUserMedia
+    this.shouldWrapGetDisplayMedia = !!options.wrapGetDisplayMedia
 
     if (typeof options.remote === 'boolean') {
       this.remote = options.remote
@@ -93,9 +128,12 @@ export class WebRTCStats extends EventEmitter {
     this.debug = !!options.debug
     this.logLevel = options.logLevel || "none"
 
-    // add event listeners for getUserMedia
     if (this.shouldWrapGetUserMedia) {
       this.wrapGetUserMedia()
+    }
+
+    if (this.shouldWrapGetDisplayMedia) {
+      this.wrapGetDisplayMedia()
     }
   }
 
@@ -342,10 +380,12 @@ export class WebRTCStats extends EventEmitter {
 
     localTracks = []
 
-    // if we wrapped gUM initially
-    if (this.shouldWrapGetUserMedia && origGetUserMedia) {
-      // put back the original
-      navigator.mediaDevices.getUserMedia = origGetUserMedia
+    if (this.gumSubscriber) {
+      this.unwrapGetUserMedia()
+    }
+
+    if (this.gdmSubscriber) {
+      this.unwrapGetDisplayMedia()
     }
 
     // clear the timeline
@@ -562,27 +602,78 @@ export class WebRTCStats extends EventEmitter {
       return
     }
 
-    this.logger.info('Wrapping getUsermedia functions.')
+    // Register this instance's subscriber — it will be called for every gUM invocation
+    // while this instance is alive.
+    const subscriber: GumSubscriber = this.parseGetUserMedia.bind(this)
+    this.gumSubscriber = subscriber
+    gumSubscribers.add(subscriber)
 
-    origGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices)
+    // If another WebRTCStats already wrapped gUM on this page, just subscribe; do not wrap again.
+    // This keeps the wrapper chain at depth 1 no matter how many instances coexist.
+    const current = navigator.mediaDevices.getUserMedia as GetUserMediaFn & { [GUM_WRAP_MARKER]?: boolean }
+    if (current && current[GUM_WRAP_MARKER]) {
+      this.logger.info('getUserMedia already wrapped by WebRTCStats; subscribing this instance.')
+      return
+    }
 
-    const getUserMediaCallback = this.parseGetUserMedia.bind(this)
-    const gum = function () {
-      // the first call will be with the constraints
-      getUserMediaCallback({constraints: arguments[0]})
+    this.logger.info('Wrapping getUserMedia.')
 
-      return origGetUserMedia.apply(navigator.mediaDevices, arguments)
+    // Remember whatever was installed before us (native or another library's wrapper) so we
+    // can restore it when the last subscriber is destroyed.
+    gumPreviousImpl = navigator.mediaDevices.getUserMedia
+
+    const previous = gumPreviousImpl
+    const wrapped = function (this: MediaDevices, constraints: MediaStreamConstraints) {
+      // Fan out the "request" event before delegating so consumers see constraints immediately.
+      gumSubscribers.forEach((sub) => {
+        try { sub({ constraints }) } catch (_e) { /* isolate subscriber errors */ }
+      })
+
+      return previous.apply(navigator.mediaDevices, [constraints])
         .then((stream) => {
-          getUserMediaCallback({stream: stream})
+          gumSubscribers.forEach((sub) => {
+            try { sub({ stream }) } catch (_e) { /* isolate subscriber errors */ }
+          })
           return stream
         }, (err) => {
-          getUserMediaCallback({error: err})
+          gumSubscribers.forEach((sub) => {
+            try { sub({ error: err }) } catch (_e) { /* isolate subscriber errors */ }
+          })
           return Promise.reject(err)
         })
     }
 
-    // replace the native method
-    navigator.mediaDevices.getUserMedia = gum.bind(navigator.mediaDevices)
+    const bound = wrapped.bind(navigator.mediaDevices) as GetUserMediaFn & { [GUM_WRAP_MARKER]?: boolean }
+    bound[GUM_WRAP_MARKER] = true
+    gumInstalledWrapper = bound
+    navigator.mediaDevices.getUserMedia = bound
+  }
+
+  private unwrapGetUserMedia (): void {
+    if (!this.gumSubscriber) return
+
+    gumSubscribers.delete(this.gumSubscriber)
+    this.gumSubscriber = null
+
+    // Only restore when the last subscriber has been removed.
+    if (gumSubscribers.size > 0) return
+    if (!gumInstalledWrapper) return
+    if (!navigator.mediaDevices) return
+
+    if (navigator.mediaDevices.getUserMedia === gumInstalledWrapper) {
+      navigator.mediaDevices.getUserMedia = gumPreviousImpl as GetUserMediaFn
+    } else {
+      // Another library wrapped on top of ours after we installed. Leave the outer wrapper
+      // in place; removing it would break that library. Our subscriber set is empty, so our
+      // wrapper is now a no-op pass-through.
+      this.logger.warn(
+        'getUserMedia was wrapped again after WebRTCStats installed; not restoring native. ' +
+        'The outer wrapper remains; our wrapper now passes through to the previous implementation.'
+      )
+    }
+
+    gumInstalledWrapper = null
+    gumPreviousImpl = null
   }
 
 
@@ -964,26 +1055,95 @@ export class WebRTCStats extends EventEmitter {
     return Date.now()
   }
 
-  // TODO
-  private wrapGetDisplayMedia () {
-    const self = this
-    // @ts-ignore
-    if (navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia) {
-      // @ts-ignore
-      const origGetDisplayMedia = navigator.mediaDevices.getDisplayMedia.bind(navigator.mediaDevices)
-      const gdm = function () {
-        self.debug('navigator.mediaDevices.getDisplayMedia', null, arguments[0])
-        return origGetDisplayMedia.apply(navigator.mediaDevices, arguments)
-          .then(function (stream: MediaStream) {
-            // self.debug('navigator.mediaDevices.getDisplayMediaOnSuccess', null, dumpStream(stream))
-            return stream
-          }, function (err: Error) {
-            self.debug('navigator.mediaDevices.getDisplayMediaOnFailure', null, err.name)
-            return Promise.reject(err)
-          })
+  private parseGetDisplayMedia (options: { constraints?: any, stream?: MediaStream, error?: Error }) {
+    try {
+      const obj = {
+        event: 'getDisplayMedia',
+        tag: 'getDisplayMedia',
+        data: {...options}
+      } as TimelineEvent
+
+      if (options.stream) {
+        obj.data.details = this.parseStream(options.stream)
+
+        // attach track listeners for screen-share tracks (mute/unmute/end fire like for gUM)
+        options.stream.getTracks().map((track) => {
+          this.addTrackEventListeners(track)
+          localTracks.push(track)
+        })
       }
-      // @ts-ignore
-      navigator.mediaDevices.getDisplayMedia = gdm.bind(navigator.mediaDevices)
+
+      this.emitEvent(obj)
+    } catch (e) {}
+  }
+
+  private wrapGetDisplayMedia (): void {
+    const mediaDevices = navigator.mediaDevices as (MediaDevices & { getDisplayMedia?: GetDisplayMediaFn }) | undefined
+    if (!mediaDevices || typeof mediaDevices.getDisplayMedia !== 'function') {
+      this.logger.warn(`'navigator.mediaDevices.getDisplayMedia' is not available in browser. Will not wrap getDisplayMedia.`)
+      return
     }
+
+    const subscriber: GdmSubscriber = this.parseGetDisplayMedia.bind(this)
+    this.gdmSubscriber = subscriber
+    gdmSubscribers.add(subscriber)
+
+    const current = mediaDevices.getDisplayMedia as GetDisplayMediaFn & { [GDM_WRAP_MARKER]?: boolean }
+    if (current && current[GDM_WRAP_MARKER]) {
+      this.logger.info('getDisplayMedia already wrapped by WebRTCStats; subscribing this instance.')
+      return
+    }
+
+    this.logger.info('Wrapping getDisplayMedia.')
+
+    gdmPreviousImpl = mediaDevices.getDisplayMedia as GetDisplayMediaFn
+    const previous = gdmPreviousImpl
+    const wrapped = function (this: MediaDevices, constraints?: any) {
+      gdmSubscribers.forEach((sub) => {
+        try { sub({ constraints }) } catch (_e) { /* isolate subscriber errors */ }
+      })
+
+      return previous.apply(navigator.mediaDevices, [constraints])
+        .then((stream: MediaStream) => {
+          gdmSubscribers.forEach((sub) => {
+            try { sub({ stream }) } catch (_e) { /* isolate subscriber errors */ }
+          })
+          return stream
+        }, (err: Error) => {
+          gdmSubscribers.forEach((sub) => {
+            try { sub({ error: err }) } catch (_e) { /* isolate subscriber errors */ }
+          })
+          return Promise.reject(err)
+        })
+    }
+
+    const bound = wrapped.bind(navigator.mediaDevices) as GetDisplayMediaFn & { [GDM_WRAP_MARKER]?: boolean }
+    bound[GDM_WRAP_MARKER] = true
+    gdmInstalledWrapper = bound
+    ;(mediaDevices as any).getDisplayMedia = bound
+  }
+
+  private unwrapGetDisplayMedia (): void {
+    if (!this.gdmSubscriber) return
+
+    gdmSubscribers.delete(this.gdmSubscriber)
+    this.gdmSubscriber = null
+
+    if (gdmSubscribers.size > 0) return
+    if (!gdmInstalledWrapper) return
+    const mediaDevices = navigator.mediaDevices as (MediaDevices & { getDisplayMedia?: GetDisplayMediaFn }) | undefined
+    if (!mediaDevices) return
+
+    if (mediaDevices.getDisplayMedia === gdmInstalledWrapper) {
+      ;(mediaDevices as any).getDisplayMedia = gdmPreviousImpl as GetDisplayMediaFn
+    } else {
+      this.logger.warn(
+        'getDisplayMedia was wrapped again after WebRTCStats installed; not restoring native. ' +
+        'The outer wrapper remains; our wrapper now passes through to the previous implementation.'
+      )
+    }
+
+    gdmInstalledWrapper = null
+    gdmPreviousImpl = null
   }
 }

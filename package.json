@@ -1,6 +1,6 @@
 {
   "name": "@peermetrics/webrtc-stats",
-  "version": "5.8.0",
+  "version": "5.9.0",
   "description": "Library that helps collect and parse webrtc stats.",
   "main": "dist/index.js",
   "repository": "https://github.com/peermetrics/webrtc-stats",
@@ -18,7 +18,7 @@
     "serve": "http-server example",
     "watch": "rollup -c rollup.config.mjs -w",
     "prepublishOnly": "npm run build",
-    "test": "tsx --test test/basic.test.ts"
+    "test": "tsx --test test/basic.test.ts test/getUserMedia-wrap.test.ts test/getDisplayMedia-wrap.test.ts"
   },
   "engines": {
     "node": ">=18"
