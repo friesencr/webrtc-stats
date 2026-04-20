@@ -4,7 +4,10 @@
   "description": "Library that helps collect and parse webrtc stats.",
   "main": "dist/index.js",
   "repository": "https://github.com/peermetrics/webrtc-stats",
-  "author": "Andrei Onel <andrei@peermetrics.io>",
+  "author": "Alberto Gonzalez <alberto@webrtc.ventures> (https://webrtc.ventures)",
+  "contributors": [
+    "Andrei Onel <andrei@peermetrics.io>"
+  ],
   "license": "MIT",
   "keywords": [
     "webrtc",
