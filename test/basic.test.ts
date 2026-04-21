@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { parseStats, computeRate, map2obj } from '../src/utils.ts'
+import { parseStats, computeRate, map2obj, computePacketLossRate } from '../src/utils.ts'
 
 /** Minimal RTCStatsReport-like map (values + get + forEach for map2obj) */
 function mockStatsMap (reports: Record<string, any>) {
@@ -22,6 +22,41 @@ test('computeRate: null when timestamps identical (no NaN)', () => {
   const prev = { timestamp: 1000, bytesReceived: 100 }
   const next = { timestamp: 1000, bytesReceived: 200 }
   assert.equal(computeRate(next as any, prev as any, 'bytesReceived'), null)
+})
+
+test('computeRate: null when counter regressed (ICE restart / renegotiation)', () => {
+  const prev = { timestamp: 1000, bytesReceived: 500 }
+  const next = { timestamp: 2000, bytesReceived: 100 }
+  assert.equal(computeRate(next as any, prev as any, 'bytesReceived'), null)
+})
+
+test('computeRate: tolerates BigInt-like counters via Number()', () => {
+  const prev = { timestamp: 1000, bytesReceived: BigInt(100) } as any
+  const next = { timestamp: 2000, bytesReceived: BigInt(600) } as any
+  assert.equal(computeRate(next, prev, 'bytesReceived'), 500)
+})
+
+test('computePacketLossRate: clamps to [0, 1] and returns 0 when no loss', () => {
+  const prev = { timestamp: 1000, packetsReceived: 100, packetsLost: 0 }
+  const next = { timestamp: 2000, packetsReceived: 200, packetsLost: 0 }
+  assert.equal(computePacketLossRate(next as any, prev as any), 0)
+})
+
+test('computePacketLossRate: fraction of dropped packets between samples', () => {
+  const prev = { timestamp: 1000, packetsReceived: 100, packetsLost: 0 }
+  const next = { timestamp: 2000, packetsReceived: 190, packetsLost: 10 }
+  assert.equal(computePacketLossRate(next as any, prev as any), 10 / 100)
+})
+
+test('computePacketLossRate: treats small negative lost delta as zero (late arrivals)', () => {
+  const prev = { timestamp: 1000, packetsReceived: 100, packetsLost: 5 }
+  const next = { timestamp: 2000, packetsReceived: 200, packetsLost: 3 }
+  assert.equal(computePacketLossRate(next as any, prev as any), 0)
+})
+
+test('computePacketLossRate: null with no previous sample', () => {
+  const next = { timestamp: 2000, packetsReceived: 190, packetsLost: 10 }
+  assert.equal(computePacketLossRate(next as any, null as any), null)
 })
 
 test('map2obj: Map to plain object', () => {
@@ -84,4 +119,29 @@ test('parseStats: bitrate on second sample (local + remote)', () => {
 
   const remoteBr = second!.remote!.audio.inbound[0].bitrate
   assert.ok(typeof remoteBr === 'number' && remoteBr > 0, 'remote inbound bitrate')
+})
+
+test('parseStats: inbound rows get packetLossRate in [0, 1] on second sample', () => {
+  const base = {
+    id: 'in1',
+    type: 'inbound-rtp',
+    kind: 'video',
+    bytesReceived: 1000,
+    packetsReceived: 100,
+    packetsLost: 0
+  }
+  const first = parseStats(
+    mockStatsMap({ in1: { ...base, timestamp: 1000 } }),
+    null
+  )
+  const second = parseStats(
+    mockStatsMap({
+      in1: { ...base, timestamp: 2000, bytesReceived: 5000, packetsReceived: 190, packetsLost: 10 }
+    }),
+    first
+  )
+  const row = second!.video.inbound[0]
+  assert.ok(row.packetLossRate != null, 'packetLossRate is computed')
+  assert.ok(row.packetLossRate! >= 0 && row.packetLossRate! <= 1, 'packetLossRate is within [0, 1]')
+  assert.equal(row.packetLossRate, 10 / 100)
 })

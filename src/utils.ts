@@ -12,12 +12,13 @@ function addDerivedRatesForMedia (
   current.inbound.forEach((report) => {
     const prev = previous.inbound.find(r => r.id === report.id)
     report.bitrate = computeBitrate(report, prev, 'bytesReceived')
-    report.packetRate = computeBitrate(report, prev, 'packetsReceived')
+    report.packetRate = computeRate(report, prev, 'packetsReceived')
+    report.packetLossRate = computePacketLossRate(report, prev)
   })
   current.outbound.forEach((report) => {
     const prev = previous.outbound.find(r => r.id === report.id)
     report.bitrate = computeBitrate(report, prev, 'bytesSent')
-    report.packetRate = computeBitrate(report, prev, 'packetsSent')
+    report.packetRate = computeRate(report, prev, 'packetsSent')
   })
 }
 
@@ -53,8 +54,19 @@ function getCandidatePairInfo (candidatePair, stats) {
   return connection
 }
 
-// Takes two stats reports and determines the rate based on two counter readings
-// and the time between them (which is in units of milliseconds).
+/**
+ * Rate per second between two counter readings in two stats reports.
+ *
+ * Returns `null` (never `NaN`) when:
+ *  - `oldReport` is missing (first sample),
+ *  - either counter is missing or non-numeric,
+ *  - the timestamp delta is zero or negative (stale / duplicated samples),
+ *  - the counter regressed (ICE restart, renegotiation, clock skew) — a negative
+ *    rate would be misleading.
+ *
+ * Counters are cast via `Number(...)` so future browsers returning `BigInt`
+ * (spec: unsigned long long) do not throw inside the subtraction.
+ */
 export function computeRate (newReport: TrackReport, oldReport: TrackReport, statName: string): number | null {
   if (!oldReport) return null
   const newVal = newReport[statName]
@@ -64,9 +76,10 @@ export function computeRate (newReport: TrackReport, oldReport: TrackReport, sta
   const o = Number(oldVal)
   if (Number.isNaN(n) || Number.isNaN(o)) return null
   const dt = newReport.timestamp - oldReport.timestamp
-  // Same timestamp (common for some remote-* reports) → avoid 0/0 → NaN
   if (!(dt > 0)) return null
-  return ((n - o) / dt) * 1000
+  const delta = n - o
+  if (delta < 0) return null
+  return (delta / dt) * 1000
 }
 
 // Convert a byte rate to a bit rate.
@@ -74,6 +87,38 @@ export function computeBitrate (newReport: TrackReport, oldReport: TrackReport, 
   const rate = computeRate(newReport, oldReport, statName)
   if (rate == null) return null
   return rate * 8
+}
+
+/**
+ * Fraction of inbound RTP packets lost between samples, clamped to [0, 1].
+ * Returns `null` if we can't compute it safely (no previous sample, missing
+ * counters, regressed counters, or zero denominator).
+ */
+export function computePacketLossRate (newReport: TrackReport, oldReport: TrackReport): number | null {
+  if (!oldReport) return null
+  const lostNow = newReport['packetsLost']
+  const lostPrev = oldReport['packetsLost']
+  const recvNow = newReport['packetsReceived']
+  const recvPrev = oldReport['packetsReceived']
+  if (lostNow == null || lostPrev == null || recvNow == null || recvPrev == null) return null
+
+  const ln = Number(lostNow)
+  const lp = Number(lostPrev)
+  const rn = Number(recvNow)
+  const rp = Number(recvPrev)
+  if ([ln, lp, rn, rp].some(v => Number.isNaN(v))) return null
+
+  const lostDelta = ln - lp
+  const recvDelta = rn - rp
+  // Packets late-arriving can briefly make lost delta negative (spec-allowed); treat as zero.
+  const lost = lostDelta > 0 ? lostDelta : 0
+  if (recvDelta < 0) return null
+  const total = recvDelta + lost
+  if (total <= 0) return null
+  const rate = lost / total
+  if (rate < 0) return 0
+  if (rate > 1) return 1
+  return rate
 }
 
 export function map2obj (stats: any) {

@@ -5,6 +5,8 @@ export interface WebRTCStatsConstructorOptions {
     statsObject: boolean
     filteredStats: boolean
     wrapGetUserMedia: boolean
+    /** If true, also wrap `navigator.mediaDevices.getDisplayMedia` (screen share). */
+    wrapGetDisplayMedia?: boolean
     debug: boolean
     remote: boolean
     logLevel: LogLevel
@@ -19,7 +21,7 @@ export interface WebRTCStatsConstructorOptions {
  */
 export type LogLevel = 'none' | 'error' | 'warn' | 'info' | 'debug'
 
-export type TimelineTag = 'getUserMedia' | 'peer' | 'connection' | 'track' | 'datachannel' | 'stats'
+export type TimelineTag = 'getUserMedia' | 'getDisplayMedia' | 'peer' | 'connection' | 'track' | 'datachannel' | 'stats'
 
 export interface TimelineEvent {
     event: string
@@ -61,6 +63,12 @@ export interface GetUserMediaResponse {
     error?: Error
 }
 
+export interface GetDisplayMediaResponse {
+    constraints?: any
+    stream?: MediaStream
+    error?: Error
+}
+
 export interface MonitorPeerOptions {
     peerId: string
     pc: RTCPeerConnection
@@ -98,6 +106,8 @@ export interface RemoveConnectionReturn {
 export interface TrackReport extends RTCStats {
     bitrate?: number | null
     packetRate?: number | null
+    /** Fraction of inbound packets lost between the previous and current sample, in [0, 1]. */
+    packetLossRate?: number | null
 }
 
 interface StatsObjectDetails {

@@ -73,6 +73,14 @@
       Charts use parsed <strong>stats</strong> when the browser exposes them (names vary by engine).
       Core: bitrate, jitter, RTT, loss. Advanced: video drops/freezes, NACK/retransmits, encoder quality
       limitation (Chrome), audio concealment samples.
+      Use <strong>New session</strong> to tear down <code>WebRTCStats</code> and create a fresh instance
+      (same as users who end a call and start another without refreshing the page).
+      Use <strong>Share screen</strong> to exercise <code>wrapGetDisplayMedia</code>: the library
+      emits <code>getDisplayMedia</code> timeline events (request/stream/error) just like it does
+      for <code>getUserMedia</code>. The screen replaces <em>only</em> peer&nbsp;1's outbound video
+      (via <code>replaceTrack</code>), so expect <strong>peer&nbsp;2's inbound bitrate</strong> to shift
+      to screen-share levels while <strong>peer&nbsp;1's inbound</strong> stays on camera (peer&nbsp;2
+      is still sending its camera track unchanged) — that asymmetry is the intended behavior, not a bug.
     </p>
 
     <div class="row">
@@ -90,6 +98,9 @@
       <button type="button" id="startButton">Start camera</button>
       <button type="button" id="callButton" disabled>Connect (offer/answer)</button>
       <button type="button" id="hangupButton" disabled>Hang up</button>
+      <button type="button" id="newSessionButton" title="Destroy WebRTCStats and create a new one (simulates a new visit without refresh)">New session (no refresh)</button>
+      <button type="button" id="shareScreenButton" title="Replaces peer 1's outbound video with the screen — only peer 2's inbound changes (peer 1's inbound stays on camera from peer 2)">Share screen (peer 1 → peer 2)</button>
+      <button type="button" id="stopShareButton" disabled title="Stops the screen share and restores the camera on peer 1's sender">Stop share</button>
     </div>
 
     <h2 style="font-size:0.9rem">Latest parsed stats (peer 1 &amp; 2)</h2>
@@ -101,6 +112,10 @@
       <div class="chart-box">
         <h3>Receive bitrate (inbound audio + video, kb/s)</h3>
         <canvas id="chartBitrate" height="160"></canvas>
+      </div>
+      <div class="chart-box">
+        <h3>Send bitrate (outbound audio + video, kb/s)</h3>
+        <canvas id="chartTxBitrate" height="160"></canvas>
       </div>
       <div class="chart-box">
         <h3>Jitter — inbound (ms)</h3>
@@ -182,17 +197,21 @@
           if (!d) return null
           let rxKbps = 0
           let hasBr = false
-          function addInboundBitrate (list) {
+          let txKbps = 0
+          let hasTxBr = false
+          function addBitrate (list, inbound) {
             if (!list) return
             list.forEach(function (r) {
               if (r.bitrate != null && !Number.isNaN(r.bitrate)) {
-                rxKbps += r.bitrate / 1000
-                hasBr = true
+                if (inbound) { rxKbps += r.bitrate / 1000; hasBr = true }
+                else { txKbps += r.bitrate / 1000; hasTxBr = true }
               }
             })
           }
-          addInboundBitrate(d.audio && d.audio.inbound)
-          addInboundBitrate(d.video && d.video.inbound)
+          addBitrate(d.audio && d.audio.inbound, true)
+          addBitrate(d.video && d.video.inbound, true)
+          addBitrate(d.audio && d.audio.outbound, false)
+          addBitrate(d.video && d.video.outbound, false)
 
           const inboundRows = []
             .concat(d.audio && d.audio.inbound ? d.audio.inbound : [])
@@ -239,6 +258,7 @@
 
           return {
             rxKbps: hasBr ? rxKbps : null,
+            txKbps: hasTxBr ? txKbps : null,
             jitterMs: jitterMs,
             rttMs: rttMs,
             pktsLost: inboundRows.length ? pktsLost : null,
@@ -253,6 +273,7 @@
 
         const METRIC_DEFAULTS = {
           rxKbps: null,
+          txKbps: null,
           jitterMs: null,
           rttMs: null,
           pktsLost: null,
@@ -268,6 +289,7 @@
         const charts = {}
         const chartIds = [
           { id: 'chartBitrate', key: 'rxKbps', yMax: null },
+          { id: 'chartTxBitrate', key: 'txKbps', yMax: null },
           { id: 'chartJitter', key: 'jitterMs', yMax: null },
           { id: 'chartRtt', key: 'rttMs', yMax: null },
           { id: 'chartLost', key: 'pktsLost', yMax: null },
@@ -281,7 +303,7 @@
 
         function chartOpts (key, yMax) {
           var yZero = [
-            'pktsLost', 'rxKbps', 'vidFramesDropped', 'vidFreezeSec', 'nackIn', 'retransIn', 'audioConcealed'
+            'pktsLost', 'rxKbps', 'txKbps', 'vidFramesDropped', 'vidFreezeSec', 'nackIn', 'retransIn', 'audioConcealed'
           ].indexOf(key) >= 0
           var y = { beginAtZero: yZero, ticks: { font: { size: 9 } } }
           if (yMax != null) {
@@ -355,16 +377,6 @@
           lastByPeer['2'] = null
         }
 
-        window.stats = new WebRTCStats({
-          getStatsInterval: 2000,
-          rawStats: false,
-          statsObject: false,
-          filteredStats: false,
-          wrapGetUserMedia: true,
-          debug: false,
-          remote: true
-        })
-
         const logEl = document.getElementById('logOut')
         const maxLogLines = 12
         function logLine (msg) {
@@ -374,25 +386,9 @@
           logEl.textContent = lines.slice(-maxLogLines).join('\n')
         }
 
-        window.stats.on('timeline', function (ev) {
-          if (ev.tag === 'stats') return
-          if (ev.tag === 'getUserMedia') {
-            console.log('[webrtc-stats demo] getUserMedia (full timeline event)', ev)
-            if (ev.data && ev.data.constraints) {
-              logLine('getUserMedia · request ' + JSON.stringify(ev.data.constraints))
-              return
-            }
-            if (ev.data && ev.data.stream) {
-              logLine('getUserMedia · stream acquired (tracks: ' + ev.data.stream.getTracks().map(function (t) { return t.kind }).join(', ') + ')')
-              return
-            }
-            logLine('getUserMedia · ' + (ev.event || 'event'))
-            return
-          }
-          logLine(ev.tag + ' · ' + (ev.event || '') + (ev.data != null && typeof ev.data === 'string' ? ' · ' + ev.data : ''))
-        })
-
         const statsOut = document.getElementById('statsOut')
+        let statsSessionId = 0
+
         function summarizeStatsData (d) {
           if (!d) return '(empty)'
           const parts = []
@@ -428,20 +424,76 @@
         }
 
         const lastStatsByPeer = {}
-        window.stats.on('stats', function (ev) {
-          console.log('[webrtc-stats demo] stats', 'peer=' + ev.peerId, ev.timeTaken + ' ms', ev.data)
-          const chartM = extractChartMetrics(ev.data)
-          if (chartM) lastByPeer[ev.peerId] = chartM
-          pushSample()
 
-          lastStatsByPeer[ev.peerId] =
-            'getStats ' + ev.timeTaken + ' ms\n' + summarizeStatsData(ev.data)
-          statsOut.textContent =
-            '=== peer 1 ===\n' + (lastStatsByPeer['1'] || '…') +
-            '\n\n=== peer 2 ===\n' + (lastStatsByPeer['2'] || '…')
-        })
+        function wireStatsInstance (stats) {
+          stats.on('timeline', function (ev) {
+            if (ev.tag === 'stats') return
+            if (ev.tag === 'getUserMedia' || ev.tag === 'getDisplayMedia') {
+              console.log('[webrtc-stats demo] ' + ev.tag + ' (full timeline event)', ev)
+              if (ev.data && ev.data.constraints) {
+                logLine(ev.tag + ' · request ' + JSON.stringify(ev.data.constraints))
+                return
+              }
+              if (ev.data && ev.data.stream) {
+                logLine(ev.tag + ' · stream acquired (tracks: ' + ev.data.stream.getTracks().map(function (t) { return t.kind }).join(', ') + ')')
+                return
+              }
+              if (ev.data && ev.data.error) {
+                logLine(ev.tag + ' · error ' + ev.data.error.name + ': ' + ev.data.error.message)
+                return
+              }
+              logLine(ev.tag + ' · ' + (ev.event || 'event'))
+              return
+            }
+            logLine(ev.tag + ' · ' + (ev.event || '') + (ev.data != null && typeof ev.data === 'string' ? ' · ' + ev.data : ''))
+          })
+
+          stats.on('stats', function (ev) {
+            console.log('[webrtc-stats demo] stats', 'peer=' + ev.peerId, ev.timeTaken + ' ms', ev.data)
+            const chartM = extractChartMetrics(ev.data)
+            if (chartM) lastByPeer[ev.peerId] = chartM
+            pushSample()
+
+            lastStatsByPeer[ev.peerId] =
+              'getStats ' + ev.timeTaken + ' ms\n' + summarizeStatsData(ev.data)
+            statsOut.textContent =
+              '=== peer 1 ===\n' + (lastStatsByPeer['1'] || '…') +
+              '\n\n=== peer 2 ===\n' + (lastStatsByPeer['2'] || '…')
+          })
+        }
+
+        /**
+         * Creates a new WebRTCStats (or replaces after destroy). Safe to call multiple times per page
+         * to simulate customers who reinitialize Peermetrics between calls without refresh.
+         */
+        window.createWebRTCStatsSession = function () {
+          if (window.stats) {
+            try {
+              window.stats.destroy()
+            } catch (e) {
+              console.warn('[webrtc-stats demo] destroy()', e)
+            }
+          }
+          delete lastStatsByPeer['1']
+          delete lastStatsByPeer['2']
+          statsSessionId += 1
+          window.stats = new WebRTCStats({
+            getStatsInterval: 2000,
+            rawStats: false,
+            statsObject: false,
+            filteredStats: false,
+            wrapGetUserMedia: true,
+            wrapGetDisplayMedia: true,
+            debug: false,
+            remote: true
+          })
+          wireStatsInstance(window.stats)
+          logLine('WebRTCStats session #' + statsSessionId + ' started (wrapGetUserMedia=true, wrapGetDisplayMedia=true)')
+          return window.stats
+        }
 
         initCharts()
+        window.createWebRTCStatsSession()
         window.demoLogLine = logLine
       })()
     </script>
@@ -452,6 +504,10 @@
       const startButton = document.getElementById('startButton')
       const callButton = document.getElementById('callButton')
       const hangupButton = document.getElementById('hangupButton')
+      const newSessionButton = document.getElementById('newSessionButton')
+      const shareScreenButton = document.getElementById('shareScreenButton')
+      const stopShareButton = document.getElementById('stopShareButton')
+      let screenStream
       const localVideo = document.getElementById('localVideo')
       const remoteVideo = document.getElementById('remoteVideo')
 
@@ -499,8 +555,8 @@
         pc2.addEventListener('icecandidate', function (e) { onIceCandidate(pc2, e) })
         pc2.addEventListener('track', gotRemoteStream)
 
-        stats.addConnection({ pc: pc1, peerId: '1' })
-        stats.addConnection({ pc: pc2, peerId: '2' })
+        window.stats.addConnection({ pc: pc1, peerId: '1' })
+        window.stats.addConnection({ pc: pc2, peerId: '2' })
 
         mediaStream.getTracks().forEach(function (track) {
           pc1.addTrack(track, mediaStream)
@@ -538,8 +594,15 @@
 
       function hangup () {
         if (window.demoLogLine) window.demoLogLine('hangup · stopping tracks and closing peer connections')
+        if (screenStream) {
+          screenStream.getTracks().forEach(function (t) { t.stop() })
+          screenStream = null
+        }
+        cameraVideoTrack = null
+        stopShareButton.disabled = true
+        shareScreenButton.disabled = false
         if (window.stats) {
-          stats.removeAllPeers()
+          window.stats.removeAllPeers()
         }
         if (pc1) {
           pc1.getSenders().forEach(function (s) { if (s.track) s.track.stop() })
@@ -563,9 +626,96 @@
         startButton.disabled = false
       }
 
+      function newSessionWithoutRefresh () {
+        if (window.demoLogLine) {
+          window.demoLogLine('New session · hang up + destroy/recreate WebRTCStats (no page reload)')
+        }
+        hangup()
+        stopShare()
+        if (typeof window.resetStatsCharts === 'function') window.resetStatsCharts()
+        if (typeof window.createWebRTCStatsSession === 'function') window.createWebRTCStatsSession()
+        document.getElementById('statsOut').textContent =
+          'New WebRTCStats session — use Start camera when ready.'
+      }
+
+      /** The camera video track we temporarily replaced on the sender during a screen share. */
+      let cameraVideoTrack = null
+
+      function findVideoSender (pc) {
+        if (!pc) return null
+        const senders = pc.getSenders()
+        for (let i = 0; i < senders.length; i++) {
+          if (senders[i].track && senders[i].track.kind === 'video') return senders[i]
+        }
+        return null
+      }
+
+      async function shareScreen () {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+          if (window.demoLogLine) window.demoLogLine('getDisplayMedia not supported in this browser')
+          return
+        }
+        if (screenStream) return
+        shareScreenButton.disabled = true
+        try {
+          screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false })
+          const screenTrack = screenStream.getVideoTracks()[0]
+          if (window.demoLogLine) {
+            window.demoLogLine('screen share started (tracks: ' + screenStream.getTracks().map(function (t) { return t.kind }).join(', ') + ')')
+          }
+
+          // Push the screen track into the active call so peer 2 actually sees it.
+          // We replaceTrack on pc1's existing video sender — same SSRC, no renegotiation.
+          const videoSender = findVideoSender(pc1)
+          if (videoSender && screenTrack) {
+            cameraVideoTrack = videoSender.track
+            await videoSender.replaceTrack(screenTrack)
+            if (window.demoLogLine) window.demoLogLine('replaceTrack · camera → screen (peer 1 sender)')
+            // Preview the shared screen locally so the demo looks right.
+            localVideo.srcObject = screenStream
+          } else if (window.demoLogLine) {
+            window.demoLogLine('no active video sender · connect the call first to see it on peer 2')
+          }
+
+          screenTrack.addEventListener('ended', function () {
+            if (window.demoLogLine) window.demoLogLine('screen share ended by user (native stop button)')
+            stopShare()
+          })
+          stopShareButton.disabled = false
+        } catch (e) {
+          screenStream = null
+          if (window.demoLogLine) window.demoLogLine('getDisplayMedia failed: ' + e.message)
+          shareScreenButton.disabled = false
+        }
+      }
+
+      async function stopShare () {
+        if (!screenStream) return
+        const videoSender = findVideoSender(pc1)
+        if (videoSender && cameraVideoTrack && cameraVideoTrack.readyState === 'live') {
+          try {
+            await videoSender.replaceTrack(cameraVideoTrack)
+            if (window.demoLogLine) window.demoLogLine('replaceTrack · screen → camera (peer 1 sender)')
+          } catch (e) {
+            if (window.demoLogLine) window.demoLogLine('replaceTrack back failed: ' + e.message)
+          }
+        }
+        screenStream.getTracks().forEach(function (t) { t.stop() })
+        screenStream = null
+        cameraVideoTrack = null
+        // Restore local preview to the camera stream if we still have it.
+        if (mediaStream) localVideo.srcObject = mediaStream
+        stopShareButton.disabled = true
+        shareScreenButton.disabled = false
+        if (window.demoLogLine) window.demoLogLine('screen share stopped')
+      }
+
       startButton.addEventListener('click', start)
       callButton.addEventListener('click', call)
       hangupButton.addEventListener('click', hangup)
+      newSessionButton.addEventListener('click', newSessionWithoutRefresh)
+      shareScreenButton.addEventListener('click', shareScreen)
+      stopShareButton.addEventListener('click', stopShare)
     </script>
   </body>
 </html>
