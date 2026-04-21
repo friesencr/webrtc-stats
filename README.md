@@ -4,9 +4,9 @@
 
 WebRTCStats is the most complete utility belt that helps with everything related to getting and parsing the stats for WebRTC `PeerConnection`s.
 
-The main advantage of WebRTCStats is that it parses and groups the stats from `PeerConnection`s and offers them in an easy to read way
+The main advantage of WebRTCStats is that it parses and groups the stats from `PeerConnection`s and offers them in an easy to read way, including per-track derived rates (`bitrate` in bits/s, `packetRate` in pkts/s, `packetLossRate` as a fraction in `[0, 1]`).
 
-On top of that, it offers the `timeline` which is a list of all the events fired while setting up a `PeerConnection`. Optionally, you can also wrap `getUserMedia` to get a better picture.
+On top of that, it offers the `timeline` which is a list of all the events fired while setting up a `PeerConnection`. Optionally, you can also wrap `getUserMedia` and `getDisplayMedia` (screen share) to get a better picture.
 
 WebRTCStats extends `EventEmitter` and uses the same event system to communicate with the rest of the app.
 
@@ -28,7 +28,12 @@ After loading, the library needs to be initialized.  *See [Options](#options) fo
 import {WebRTCStats} from '@peermetrics/webrtc-stats'
 
 let webrtcStats = new WebRTCStats({
-    getStatsInterval: 5000
+    getStatsInterval: 5000,
+    // Recommended: wrap the media-capture APIs so the timeline includes
+    // when/why getUserMedia and getDisplayMedia (screen share) were called,
+    // succeeded, or failed. Both default to false — see Options below.
+    wrapGetUserMedia: true,
+    wrapGetDisplayMedia: true
 })
 ```
 Add event listeners for `stats`:
@@ -83,7 +88,13 @@ let stats = new WebRTCStats({
 
     // If we should wrap the `getUserMedia` calls so we can gather events when the methods is called or success/error
     wrapGetUserMedia: false, // Default: false
-    
+
+    // Same as wrapGetUserMedia but for `getDisplayMedia` (screen share).
+    // Emits `getDisplayMedia` timeline events (request / stream / error).
+    // Multiple WebRTCStats instances on the same page share a single wrapper
+    // (single-wrap + subscriber pattern), so there is no recursion risk.
+    wrapGetDisplayMedia: false, // Default: false
+
     // If we should log messages
     debug: false, // Default: false
     
@@ -136,7 +147,7 @@ Used to stop listening to all the peers and connections added.
 
 #### `.getTimeline([filter])`
 Return the array of events from the timeline up to that point.
-If the optional `filter` string is present it will filter out events. Possible values: `peer`, `connection`, `track`, `stats`, `getUserMedia`
+If the optional `filter` string is present it will filter out events. Possible values: `peer`, `connection`, `track`, `datachannel`, `stats`, `getUserMedia`, `getDisplayMedia`
 
 #### `.destroy()`
 
@@ -186,7 +197,8 @@ The tags for the events fired by `WebRTCStats` are:
 
 - `timeline`: this will fire when something has been added to the timeline. This event is a duplicate of the following events
 - `stats`: fired for each peer when we've collected stats for it
-- `getUserMedia`: when `getUserMedia` is called initially
+- `getUserMedia`: when `getUserMedia` is called (request, resulting stream, or error). Requires `wrapGetUserMedia: true`.
+- `getDisplayMedia`: when `getDisplayMedia` (screen share) is called (request, resulting stream, or error). Requires `wrapGetDisplayMedia: true`.
 - `peer`: when a peer was added
 - `track`: a track event: addTrack, removeTrack, mute, unmute, overconstrained
 - `connection`: any event related to connection
